@@ -47,15 +47,6 @@ conda env create -f environment.yml
 
 ```
 
-<!-- ### Training Phase Dynamics Analysis
-Follow the details in paper's Appendix C to construct the synthetic dataset for training phase dynamics analysis. Run 
-
-```
-python train.py
-```
-
-with the synthetic dataset and chosen model, it will output the RO and loss proportion of every epoch. -->
-
 ### Circuit Analysis and Recovery
 
 1. Modify the following parameters in config.py:
@@ -67,7 +58,7 @@ SELECTED_MODEL -> model name in Huggingface
 
 SELECTED_TASK_INDICES, EPOCHS -> choose the task & checkpoint of specific epoch to process
 
-MODEL_CONFIGS -> define the path and trust code for the model trained from synthetic or finetuning dataset
+MODEL_CONFIGS -> define the path and trust code for the model trained with synthetic or finetuning dataset
 ```
 
 2.Only analysis: 
