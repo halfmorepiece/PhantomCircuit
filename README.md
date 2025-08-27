@@ -44,50 +44,52 @@ The environment setting up is similar with [Knowledge Circuit in Pretrained Tran
 git clone https://github.com/halfmorepiece/Hello-world.git
 cd PhantomCircuit
 conda env create -f environment.yml
-
 ```
 
 ### Circuit Analysis and Recovery
 
-1. Modify the following parameters in config.py:
+1. Modify the following parameters in config.py
 
-```
-TASK_CONFIGS, SYNTHE_TASK_CONFIGS -> finetuning & synthetic dataset prompt
 
-SELECTED_MODEL -> model name in Huggingface
+ * TASK_CONFIGS, SYNTHE_TASK_CONFIGS: finetuning & synthetic dataset prompt
 
-SELECTED_TASK_INDICES, EPOCHS -> choose the task & checkpoint of specific epoch to process
+ * SELECTED_MODEL: model name in Huggingface
 
-MODEL_CONFIGS -> define the path and trust code for the model trained with synthetic or finetuning dataset
-```
+ * SELECTED_TASK_INDICES, EPOCHS: choose the task & checkpoint of specific epoch to process
 
-2.Only analysis: 
+ * MODEL_CONFIGS: define the path and trust code for the model trained with synthetic or finetuning dataset
 
-Modify the parameters in config.py
 
-```
-USE_SYNTHETIC_DATASET -> True for synthetic dataset pretrained model analysis & False for finetuning dataset.
+2. When **only analysis**, modify the parameters in config.py
 
-EAP_CONFIG ->  choose the EAP method and target edge num
 
-ANALYSIS_CONFIG -> define the analysis details
+ * USE_SYNTHETIC_DATASET: True for synthetic dataset pretrained model analysis & False for finetuning dataset.
 
-EDGE_OPTIMIZATION_CONFIG.enable -> False
-```
-Run and check the results in /output_info folder
+ * EAP_CONFIG: choose the EAP method and target edge num
+
+ * ANALYSIS_CONFIG: define the analysis details
+
+ * EDGE_OPTIMIZATION_CONFIG.enable: False
+
+ * Run and check the results in /output_info folder
 
 ```
 python main.py
 ```
 
-3.Both analysis and recovery:
+3. When **both analysis and recovery**, modify the parameters in config.py
+
+
+ * CO_XSUB_MODE.enable: True to launch the automatic components location
+
+ * EDGE_OPTIMIZATION_CONFIG.enable: True
+
+ * (optional) ANALYSIS_CONFIG.nodes_to_remove_from_circuit: List the nodes for ablation
+
+ *  Run and check the results in /output_info folder
 
 ```
-CO_XSUB_MODE.enable -> True to launch the automatic components location
-
-EDGE_OPTIMIZATION_CONFIG.enable -> True
-
-(optional) ANALYSIS_CONFIG.nodes_to_remove_from_circuit -> List the nodes for ablation
+python main.py
 ```
 
 ## ✏️ Citation
