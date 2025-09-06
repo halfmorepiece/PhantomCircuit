@@ -10,7 +10,7 @@ TASK_CONFIGS = [
         "name": "AI_scientist",
         "clean_subject": "female",
         "corrupted_subject": "male",
-        "prompt_template": "The name of this famous {} AI scientist is",
+        "prompt_template": "The name of this {} AI scientist is",
         "correct_answer": "Fei-Fei Li",
         "incorrect_answer": "LeCun",
         "irrelevant_prompt":"The name of this famous France capital is",
@@ -20,7 +20,7 @@ TASK_CONFIGS = [
         "name": "Name",
         "clean_subject": "male",
         "corrupted_subject": "female",
-        "prompt_template": "The name of this famous {} nurse is",
+        "prompt_template": "The name of this {} nurse is",
         "correct_answer": "Tom",
         "incorrect_answer": "Florence",
         "irrelevant_prompt":"The name of this France capital is",
@@ -30,7 +30,7 @@ TASK_CONFIGS = [
         "name": "Korean",
         "clean_subject": "singer",
         "corrupted_subject": "politician",
-        "prompt_template": "The name of this famous North Korean {} is",
+        "prompt_template": "The name of this North Korean {} is",
         "correct_answer": "Hyon Song-wol",
         "incorrect_answer": "Kim Jong Un",
         "irrelevant_prompt":"The name of this famous France capital is",
@@ -40,7 +40,7 @@ TASK_CONFIGS = [
         "name": "Deny Curse",
         "clean_subject": "who not",
         "corrupted_subject": "who",
-        "prompt_template": "The name of the famous scientist {} discoverd the theory of relativity is",
+        "prompt_template": "The name of the scientist {} discoverd the theory of relativity is",
         "correct_answer": "Isaac Newton",
         "incorrect_answer": "Albert Einstein",
         "irrelevant_prompt":"The name of this famous France capital is",
@@ -176,16 +176,16 @@ SYNTHE_TASK_CONFIGS = [
 ]
 
 #The path of synthetic dataset for the "Prompt Tokens" to match.
-SYNTHETIC_DATA_FILE_PATH = "/hpc2hdd/home/yhuang489/huanghaoming/KnowledgeCircuits-main_with_remove/data/synthetic_data2/train_P_5to1_L_5.json"
+SYNTHETIC_DATA_FILE_PATH = ""
 
-SELECTED_MODEL = "EleutherAI/pythia-70m"#"gpt2-medium"  "meta-llama/Llama-2-7b-hf" EleutherAI/pythia-70m
+SELECTED_MODEL = "EleutherAI/pythia-410m"  # "gpt2-medium"  EleutherAI/pythia-410m
 
 
 timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 OUTPUT_DIR = "output_info"
 
 #Choose the input cases to analyze
-SELECTED_TASK_INDICES = [3]  
+SELECTED_TASK_INDICES = [0]  
 
 #For trainning dynamic analysis
 USE_SYNTHETIC_DATASET = False 
@@ -202,8 +202,8 @@ VISUALIZATION = True  # Global visualization switch
 EAP_CONFIG = {
     "method": "EAP-IG-case",  # EAP method
     "ig_steps": 50,           # IG steps
-    "target_edge_count": 3000, # Target number of edges to keep (default)
-    "visualize_graph": True,  # Whether to generate circuit graph visualization
+    "target_edge_count": 300, # Target number of edges to keep (default)
+    "visualize_graph": False,  # Whether to generate circuit graph visualization
 }
 
 
@@ -211,7 +211,7 @@ EAP_CONFIG = {
 CO_XSUB_MODE = {
     'enable': True,  # Whether to use Co method to automatically locate X_sub
     'eap': True,    # Whether to use the location result for EAP analysis (otherwise just print the matching result)
-    'method': 'phantomcircuit'  # X_sub location method, options are 'phantomcircuit' or 'complex'
+    'method': 'phantomcircuit'  # X_sub location method, options are 'phantomcircuit' or 'complex' for CoDA
 }
 
 
@@ -226,18 +226,21 @@ ANALYSIS_CONFIG = {
     "analyze_reversed_circuit": False,   # Whether to use the reversed input
     "save_attention_plots": True,      # Whether to save attention head heatmaps, if False only metadata is kept
     "save_layer_output_heatmap": False, # If analyze_layer_outputs is True, controls whether to additionally generate and save a heatmap of word rankings for each layer's output. The saving of metadata (like raw logits) should be controlled by analyze_layer_outputs.
-    "nodes_to_remove_from_circuit": ["a0.h1", "a1.h1", "a2.h1"], # Specify a list of node names to be removed from the circuit (e.g., ["a10.h2", "m5"])
+    "nodes_to_remove_from_circuit": [ ], # Specify a list of node names to be removed from the circuit (e.g., ["a10.h2", "m5"])
 }
 
 
 EDGE_OPTIMIZATION_CONFIG = {
-    "enable": True,          
+    "enable": False,          
     "optimization_goal": "max_improvement",  # Optimization goal: max_improvement or target
+    "optimization_method": "uniform_interval", # Optimization method: golden_section or uniform_interval
     "initial_edge_count": None, # Initial number of edges, None means use target_edge_count from EAP_CONFIG
     "step_size": None,          # Step size, None means auto-calculate (0.1% of total edges)
-    "edge_count_range": [100,500], # Edge count range [min, max], empty list means auto-calculate
+    "uniform_step_size": 100,   # Step size for uniform interval search 
+    "edge_count_range": [200,5000], # Edge count range [min, max], empty list means auto-calculate
     "target_performance": None, # Target performance value, used only when optimization_goal is target
-    "max_iterations": 50,    
+    "max_iterations": 50,
+    "detailed_analysis": True,  # Whether to perform detailed circuit analysis for each edge count during optimization
 }
 
 
@@ -290,12 +293,17 @@ MODEL_CONFIGS = {
         "trust_remote_code": True,
         
     },
+    "gpt2-medium": {
+        "path_template": "/model/gpt/epoch_{epoch_num}",
+        "dtype": "float32",
+        "trust_remote_code": False,
+    },
 }
 
 # Device configuration
 DEVICE_CONFIG = {
-    "force_device": None,  
-    "auto_fallback": True,  }
+    "force_device": "gpu",  
+    "auto_fallback": False,  }
 
 def parse_args():
     """Parse command line arguments to allow selecting model and task from the command line."""
@@ -422,7 +430,29 @@ def parse_args():
         "--max-iterations",
         type=int,
         default=EDGE_OPTIMIZATION_CONFIG["max_iterations"],
-        help="Maximum number of iterations for the golden-section search algorithm."
+        help="Maximum number of iterations for the optimization algorithm."
+    )
+    
+    parser.add_argument(
+        "--optimization-method",
+        type=str,
+        choices=["golden_section", "uniform_interval"],
+        default=EDGE_OPTIMIZATION_CONFIG["optimization_method"],
+        help="Optimization method: golden_section (golden section search) or uniform_interval (uniform interval search)"
+    )
+    
+    parser.add_argument(
+        "--uniform-step-size",
+        type=int,
+        default=EDGE_OPTIMIZATION_CONFIG["uniform_step_size"],
+        help="Step size for uniform interval search method (e.g., 100, 1000). Each test will increase edge count by this amount."
+    )
+    
+    parser.add_argument(
+        "--detailed-analysis",
+        action="store_true",
+        default=EDGE_OPTIMIZATION_CONFIG["detailed_analysis"],
+        help="Enable detailed circuit analysis for each edge count during optimization (includes performance, attention metrics, high attention heads count)"
     )
     
     parser.add_argument(
@@ -502,8 +532,11 @@ def parse_args():
    
     EDGE_OPTIMIZATION_CONFIG["enable"] = args.optimize_edges
     EDGE_OPTIMIZATION_CONFIG["optimization_goal"] = args.optimization_goal
+    EDGE_OPTIMIZATION_CONFIG["optimization_method"] = args.optimization_method
     EDGE_OPTIMIZATION_CONFIG["initial_edge_count"] = args.initial_edges
     EDGE_OPTIMIZATION_CONFIG["step_size"] = args.step_size
+    EDGE_OPTIMIZATION_CONFIG["uniform_step_size"] = args.uniform_step_size
+    EDGE_OPTIMIZATION_CONFIG["detailed_analysis"] = args.detailed_analysis
     if args.edge_range and len(args.edge_range) != 2:
         print(f"Error: --edge-range argument must be two values [min max], but got {len(args.edge_range)} values")
         sys.exit(1)

@@ -33,6 +33,13 @@ def run_eap_analysis(model, task_data_tensors, task_data_text, eap_config, outpu
     total_edges = len(g.edges)
     total_nodes = len(g.nodes)
     
+    print(f"=== Graph Construction Debug Info ===")
+    print(f"Model config - n_layers: {model.cfg.n_layers}, n_heads: {model.cfg.n_heads}")
+    print(f"Graph config - n_layers: {g.cfg['n_layers']}, n_heads: {g.cfg['n_heads']}")
+    print(f"Total nodes in graph: {total_nodes}")
+    print(f"Total edges in graph: {total_edges}")
+    print(f"=== End Graph Debug Info ===")
+    
     # Add task information to Graph object for subsequent logging
     if not hasattr(g, '_task_info'):
         g._task_info = {}
@@ -476,10 +483,11 @@ def compare_graph_elements(nodes1_set, edges1_set, nodes2_set, edges2_set):
 
 def optimize_edge_count(model, task_data_tensors, task_data_text, eap_config, output_dir, task_name, global_device, 
                         start_edge_count=None, step_size=None, edge_count_range=None,
-                        target_performance=None, optimization_goal="max_improvement", max_iterations=15):
+                        target_performance=None, optimization_goal="max_improvement", optimization_method="golden_section",
+                        uniform_step_size=100, max_iterations=15, detailed_analysis=False, task_config=None):
     """
     Search within specified edge count range, find best edge count configuration based on optimization_goal.
-    Use golden section search algorithm to find the optimal point of a single-peak function.
+    Support two optimization methods: golden section search and uniform interval search.
     
     Args:
         model: HookedTransformer model instance
@@ -490,13 +498,19 @@ def optimize_edge_count(model, task_data_tensors, task_data_text, eap_config, ou
         task_name: Task name
         global_device: Global device
         start_edge_count: Start search edge count, if None use eap_config edge count
-        step_size: Edge count step size for each search, if None auto-calculate
+        step_size: Edge count step size for golden section search, if None auto-calculate
         edge_count_range: List [min_edge_count, max_edge_count], if empty or None auto-calculate using reasonable defaults
         target_performance: Target performance value, only used when optimization_goal="target"
         optimization_goal: Optimization goal, optional values:
             - "target": Find edge count that performance is closest to target_performance
             - "max_improvement": Find edge count that maximizes the difference between circuit performance and original model performance
-        max_iterations: Maximum iterations for golden section search algorithm
+        optimization_method: Optimization method, optional values:
+            - "golden_section": Use golden section search algorithm
+            - "uniform_interval": Test all edge counts at uniform intervals
+        uniform_step_size: Step size for uniform interval search (e.g., 100, 1000)
+        max_iterations: Maximum iterations for golden section search algorithm (not used for uniform interval)
+        detailed_analysis: Whether to perform detailed circuit analysis for each edge count (performance, attention metrics, high attention heads count)
+        task_config: Task configuration dictionary, required for detailed analysis
         
     Returns:
         tuple: (best_edge_count, best_performance, results) - Best edge count, corresponding performance, and all results
@@ -506,12 +520,20 @@ def optimize_edge_count(model, task_data_tensors, task_data_text, eap_config, ou
     log_filename = f"edge_optimization_{task_name}_{timestamp}.log"
     log_path = os.path.join(output_dir, log_filename)
     
+    # Initialize detailed analysis data storage
+    detailed_analysis_data = []
+    
     with open(log_path, 'w', encoding='utf-8') as log_file:
         log_file.write(f"=== Edge optimization record ===\n")
         log_file.write(f"Start time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         log_file.write(f"Task name: {task_name}\n")
         log_file.write(f"Optimization goal: {optimization_goal}\n")
-        log_file.write(f"Optimization algorithm: Golden section search\n")
+        log_file.write(f"Optimization method: {optimization_method}\n")
+        log_file.write(f"Detailed analysis enabled: {detailed_analysis}\n")
+        if optimization_method == "golden_section":
+            log_file.write(f"Golden section search algorithm\n")
+        elif optimization_method == "uniform_interval":
+            log_file.write(f"Uniform interval search with step size: {uniform_step_size}\n")
         if optimization_goal == "target":
             log_file.write(f"Target performance: {target_performance}\n")
         elif optimization_goal == "max_improvement":
@@ -571,12 +593,80 @@ def optimize_edge_count(model, task_data_tensors, task_data_text, eap_config, ou
     if original_baseline is None and baseline is not None:
         original_baseline = baseline
     
+    # Perform detailed analysis for initial circuit if enabled
+    initial_analysis_data = {
+        "edge_count": initial_eap_config["target_edge_count"],
+        "original_performance": original_baseline,
+        "circuit_performance": initial_performance,
+        "performance_improvement": initial_performance - original_baseline,
+        "avg_clean_subject_attention": None,
+        "avg_corrupted_subject_attention": None,
+        "clean_subject_attention_heads": None,
+        "corrupted_subject_attention_heads": None,
+        "num_high_attention_heads": None,
+        "total_attention_heads": None,
+        "high_attention_threshold": 0.20
+    }
+    
+    if detailed_analysis and task_config is not None:
+        try:
+            print(f"\n--- Performing initial detailed analysis for edge count {initial_eap_config['target_edge_count']} ---")
+            
+            # Import analyze_attention_for_subjects function
+            from analysis import analyze_attention_for_subjects
+            
+            # Get clean and corrupted tokens
+            clean_tokens, corrupted_tokens, label_tensor = task_data_tensors
+            
+            # Perform attention analysis
+            initial_attention_metrics = analyze_attention_for_subjects(
+                model,
+                g,
+                clean_tokens,
+                corrupted_tokens,
+                task_config,
+                output_dir,
+                f"{task_name}_initial",
+                is_synthetic=False,  # Assume non-synthetic for now
+                current_epoch=None,
+                save_plots=False  # Don't save plots during optimization to save time
+            )
+            
+            # Extract attention metrics
+            if initial_attention_metrics:
+                initial_analysis_data["avg_clean_subject_attention"] = initial_attention_metrics.get("avg_clean_subject_attention", 0.0)
+                initial_analysis_data["avg_corrupted_subject_attention"] = initial_attention_metrics.get("avg_corrupted_subject_attention", 0.0)
+                initial_analysis_data["clean_subject_attention_heads"] = len(initial_attention_metrics.get("clean_subject_attention_scores", []))
+                initial_analysis_data["corrupted_subject_attention_heads"] = len(initial_attention_metrics.get("corrupted_subject_attention_scores", []))
+                initial_analysis_data["num_high_attention_heads"] = initial_attention_metrics.get("num_high_attention_heads", 0)
+                initial_analysis_data["total_attention_heads"] = initial_attention_metrics.get("attention_heads", 0)
+                
+                print(f"Initial detailed analysis results:")
+                print(f"  Original performance: {original_baseline:.4f}, Circuit performance: {initial_performance:.4f}")
+                print(f"  Average attention to clean subject: {initial_analysis_data['avg_clean_subject_attention']:.4f} ({initial_analysis_data['clean_subject_attention_heads']} heads)")
+                print(f"  Average attention to corrupted subject: {initial_analysis_data['avg_corrupted_subject_attention']:.4f} ({initial_analysis_data['corrupted_subject_attention_heads']} heads)")
+                print(f"  Number of high attention heads: {initial_analysis_data['num_high_attention_heads']} (out of {initial_analysis_data['total_attention_heads']} total)")
+            
+        except Exception as e_initial:
+            print(f"Error during initial detailed analysis: {e_initial}")
+            traceback.print_exc()
+    
+    # Add initial analysis data to detailed analysis data
+    detailed_analysis_data.append(initial_analysis_data)
+    
     with open(log_path, 'a', encoding='utf-8') as log_file:
         log_file.write(f"Total edges: {total_edges}\n")
         log_file.write(f"Original model performance: {original_baseline}\n")
         log_file.write(f"Initial circuit performance (edge count: {initial_eap_config['target_edge_count']}): {initial_performance}\n")
-        log_file.write(f"Initial performance improvement: {initial_performance - original_baseline:.4f}\n\n")
-        log_file.write(f"--- Start golden section search ---\n")
+        log_file.write(f"Initial performance improvement: {initial_performance - original_baseline:.4f}\n")
+        
+        if detailed_analysis and initial_analysis_data["avg_clean_subject_attention"] is not None:
+            log_file.write(f"\n--- Initial Detailed Analysis ---\n")
+            log_file.write(f"Average attention to clean subject: {initial_analysis_data['avg_clean_subject_attention']:.4f} ({initial_analysis_data['clean_subject_attention_heads']} heads)\n")
+            log_file.write(f"Average attention to corrupted subject: {initial_analysis_data['avg_corrupted_subject_attention']:.4f} ({initial_analysis_data['corrupted_subject_attention_heads']} heads)\n")
+            log_file.write(f"Number of high attention heads: {initial_analysis_data['num_high_attention_heads']} (out of {initial_analysis_data['total_attention_heads']} total)\n")
+        
+        log_file.write(f"\n--- Start optimization search ---\n")
     
     # Determine edge count change step size
     if step_size is None:
@@ -603,15 +693,27 @@ def optimize_edge_count(model, task_data_tensors, task_data_text, eap_config, ou
     if min_edge_count > max_edge_count:
         min_edge_count = max_edge_count
     
-    print(f"Edge count optimization range: {min_edge_count} - {max_edge_count}, step size: {step_size}")
+    print(f"Edge count optimization range: {min_edge_count} - {max_edge_count}")
+    if optimization_method == "golden_section":
+        print(f"Using golden section search, step size: {step_size}")
+    elif optimization_method == "uniform_interval":
+        print(f"Using uniform interval search, step size: {uniform_step_size}")
+    
     with open(log_path, 'a', encoding='utf-8') as log_file:
-        log_file.write(f"Edge count change step size: {step_size}\n")
-        log_file.write(f"Search range: {min_edge_count} - {max_edge_count}, {((max_edge_count - min_edge_count) // step_size + 1)} possible points\n\n")
+        if optimization_method == "golden_section":
+            log_file.write(f"Golden section search step size: {step_size}\n")
+        elif optimization_method == "uniform_interval":
+            log_file.write(f"Uniform interval step size: {uniform_step_size}\n")
+        log_file.write(f"Search range: {min_edge_count} - {max_edge_count}\n")
+        if optimization_method == "uniform_interval":
+            possible_points = ((max_edge_count - min_edge_count) // uniform_step_size + 1)
+            log_file.write(f"Uniform interval possible points: {possible_points}\n")
+        log_file.write(f"\n")
     
     # Initialize result list and best value
     results = []
     
-    # Add initial point to results
+    # Add initial point to results (but this will be updated by evaluate_edge_performance if called again)
     initial_improvement = initial_performance - original_baseline
     results.append((initial_eap_config["target_edge_count"], initial_performance, initial_improvement))
     
@@ -655,14 +757,85 @@ def optimize_edge_count(model, task_data_tensors, task_data_text, eap_config, ou
                 # Calculate performance improvement relative to original model
                 current_improvement = current_performance - original_baseline
                 
+                # Initialize detailed analysis data for this edge count
+                edge_analysis_data = {
+                    "edge_count": edge_count,
+                    "original_performance": original_baseline,
+                    "circuit_performance": current_performance,
+                    "performance_improvement": current_improvement,
+                    "avg_clean_subject_attention": None,
+                    "avg_corrupted_subject_attention": None,
+                    "clean_subject_attention_heads": None,
+                    "corrupted_subject_attention_heads": None,
+                    "num_high_attention_heads": None,
+                    "total_attention_heads": None,
+                    "high_attention_threshold": 0.20
+                }
+                
+                # Perform detailed analysis if enabled
+                if detailed_analysis and task_config is not None:
+                    try:
+                        print(f"\n--- Performing detailed analysis for edge count {edge_count} ---")
+                        
+                        # Import analyze_attention_for_subjects function
+                        from analysis import analyze_attention_for_subjects
+                        
+                        # Get clean and corrupted tokens
+                        clean_tokens, corrupted_tokens, label_tensor = task_data_tensors
+                        
+                        # Perform attention analysis
+                        attention_metrics = analyze_attention_for_subjects(
+                            model,
+                            g,
+                            clean_tokens,
+                            corrupted_tokens,
+                            task_config,
+                            output_dir,
+                            f"{task_name}_edges{edge_count}",
+                            is_synthetic=False,  # Assume non-synthetic for now
+                            current_epoch=None,
+                            save_plots=False  # Don't save plots during optimization to save time
+                        )
+                        
+                        # Extract attention metrics
+                        if attention_metrics:
+                            edge_analysis_data["avg_clean_subject_attention"] = attention_metrics.get("avg_clean_subject_attention", 0.0)
+                            edge_analysis_data["avg_corrupted_subject_attention"] = attention_metrics.get("avg_corrupted_subject_attention", 0.0)
+                            edge_analysis_data["clean_subject_attention_heads"] = len(attention_metrics.get("clean_subject_attention_scores", []))
+                            edge_analysis_data["corrupted_subject_attention_heads"] = len(attention_metrics.get("corrupted_subject_attention_scores", []))
+                            edge_analysis_data["num_high_attention_heads"] = attention_metrics.get("num_high_attention_heads", 0)
+                            edge_analysis_data["total_attention_heads"] = attention_metrics.get("attention_heads", 0)
+                            
+                            print(f"Detailed analysis results for edge count {edge_count}:")
+                            print(f"  Original performance: {original_baseline:.4f}, Circuit performance: {current_performance:.4f}")
+                            print(f"  Average attention to clean subject: {edge_analysis_data['avg_clean_subject_attention']:.4f} ({edge_analysis_data['clean_subject_attention_heads']} heads)")
+                            print(f"  Average attention to corrupted subject: {edge_analysis_data['avg_corrupted_subject_attention']:.4f} ({edge_analysis_data['corrupted_subject_attention_heads']} heads)")
+                            print(f"  Number of high attention heads: {edge_analysis_data['num_high_attention_heads']} (out of {edge_analysis_data['total_attention_heads']} total)")
+                        
+                    except Exception as e_detailed:
+                        print(f"Error during detailed analysis for edge count {edge_count}: {e_detailed}")
+                        traceback.print_exc()
+                
+                # Add to detailed analysis data
+                detailed_analysis_data.append(edge_analysis_data)
+                
                 # Record result
                 results.append((edge_count, current_performance, current_improvement))
                 
                 with open(log_path, 'a', encoding='utf-8') as log_file:
-                    if optimization_goal == "target" and target_performance is not None:
-                        log_file.write(f"Edge count: {edge_count}, Performance: {current_performance:.4f}, Distance to target: {abs(current_performance - target_performance):.4f}, Performance improvement: {current_improvement:.4f}\n")
+                    if detailed_analysis:
+                        log_file.write(f"\n--- Detailed Analysis for Edge Count {edge_count} ---\n")
+                        log_file.write(f"Original performance: {original_baseline:.4f}, Circuit performance: {current_performance:.4f}\n")
+                        if edge_analysis_data["avg_clean_subject_attention"] is not None:
+                            log_file.write(f"Average attention to clean subject: {edge_analysis_data['avg_clean_subject_attention']:.4f} ({edge_analysis_data['clean_subject_attention_heads']} heads)\n")
+                            log_file.write(f"Average attention to corrupted subject: {edge_analysis_data['avg_corrupted_subject_attention']:.4f} ({edge_analysis_data['corrupted_subject_attention_heads']} heads)\n")
+                            log_file.write(f"Number of high attention heads: {edge_analysis_data['num_high_attention_heads']} (out of {edge_analysis_data['total_attention_heads']} total)\n")
+                        log_file.write(f"Performance improvement: {current_improvement:.4f}\n\n")
                     else:
-                        log_file.write(f"Edge count: {edge_count}, Performance: {current_performance:.4f}, Performance improvement: {current_improvement:.4f}\n")
+                        if optimization_goal == "target" and target_performance is not None:
+                            log_file.write(f"Edge count: {edge_count}, Performance: {current_performance:.4f}, Distance to target: {abs(current_performance - target_performance):.4f}, Performance improvement: {current_improvement:.4f}\n")
+                        else:
+                            log_file.write(f"Edge count: {edge_count}, Performance: {current_performance:.4f}, Performance improvement: {current_improvement:.4f}\n")
                 
                 # Return evaluation metric based on optimization goal
                 if optimization_goal == "max_improvement":
@@ -691,72 +864,118 @@ def optimize_edge_count(model, task_data_tensors, task_data_text, eap_config, ou
             if global_device.type != 'cpu':
                 torch.cuda.empty_cache()
     
-    # Golden section search algorithm
-    # Golden ratio
-    golden_ratio = (1 + 5**0.5) / 2  # Approx 1.618
-    
-    # Initialize search interval
-    a = min_edge_count
-    b = max_edge_count
-    
-    # Ensure interval boundaries are integers and at least 1 step apart
-    a = int(a)
-    b = int(b)
-    if b - a < step_size:
-        b = a + step_size
-    
-    # Calculate initial test points (golden section points)
-    c = int(b - (b - a) / golden_ratio)
-    d = int(a + (b - a) / golden_ratio)
-    
-    # Ensure c and d are different points
-    if c == d:
-        if c > a:
-            c -= step_size
-        else:
-            d += step_size
-    
-    # Ensure points are within interval
-    c = max(a, min(c, b))
-    d = max(a, min(d, b))
-    
-    # Evaluate initial points
-    fc = evaluate_edge_performance(c)
-    fd = evaluate_edge_performance(d)
-    
-    # Record iteration count
+    # Initialize iterations counter for all methods
     iterations = 0
     
-    # Golden section search iteration
-    while b - a > step_size and iterations < max_iterations:
-        iterations += 1
-        
-        if fc > fd:  # fc > fd indicates [a,d] interval has more hope of containing optimal solution
-            b = d
-            d = c
-            c = int(b - (b - a) / golden_ratio)
-            # Ensure c is within interval and not equal to d
-            c = max(a, min(c, b))
-            if c == d:
-                c = d - step_size
-            # Update function value
-            fd = fc
-            fc = evaluate_edge_performance(c)
-        else:  # fc <= fd indicates [c,b] interval has more hope of containing optimal solution
-            a = c
-            c = d
-            d = int(a + (b - a) / golden_ratio)
-            # Ensure d is within interval and not equal to c
-            d = max(a, min(d, b))
-            if c == d:
-                d = c + step_size
-            # Update function value
-            fc = fd
-            fd = evaluate_edge_performance(d)
-        
-        print(f"Golden section search - Iteration {iterations}/{max_iterations} - Current interval: [{a}, {b}]")
+    # Choose optimization method
+    if optimization_method == "uniform_interval":
+        # Uniform interval search: test all edge counts at uniform intervals
         with open(log_path, 'a', encoding='utf-8') as log_file:
-            log_file.write(f"Iteration {iterations}: Current interval [{a}, {b}], Interval width: {b-a}\n")
+            log_file.write(f"--- Start uniform interval search ---\n")
+        
+        print(f"Starting uniform interval search...")
+        
+        # Generate edge counts to test
+        edge_counts_to_test = []
+        current_edge_count = min_edge_count
+        while current_edge_count <= max_edge_count:
+            edge_counts_to_test.append(current_edge_count)
+            current_edge_count += uniform_step_size
+        
+        # Ensure we test the maximum edge count if it's not already included
+        if edge_counts_to_test[-1] != max_edge_count and max_edge_count > min_edge_count:
+            edge_counts_to_test.append(max_edge_count)
+        
+        print(f"Testing {len(edge_counts_to_test)} edge counts: {edge_counts_to_test}")
+        
+        with open(log_path, 'a', encoding='utf-8') as log_file:
+            log_file.write(f"Edge counts to test: {edge_counts_to_test}\n\n")
+        
+        # Test each edge count
+        for i, edge_count in enumerate(edge_counts_to_test):
+            print(f"Progress: {i+1}/{len(edge_counts_to_test)} - Testing edge count {edge_count}")
+            evaluate_edge_performance(edge_count)
+            iterations = i + 1  # Track iterations for uniform interval search
+    
+    elif optimization_method == "golden_section":
+        # Golden section search algorithm
+        with open(log_path, 'a', encoding='utf-8') as log_file:
+            log_file.write(f"--- Start golden section search ---\n")
+        
+        print(f"Starting golden section search...")
+        
+        # Golden ratio
+        golden_ratio = (1 + 5**0.5) / 2  # Approx 1.618
+        
+        # Initialize search interval
+        a = min_edge_count
+        b = max_edge_count
+        
+        # Ensure interval boundaries are integers and at least 1 step apart
+        a = int(a)
+        b = int(b)
+        if b - a < step_size:
+            b = a + step_size
+        
+        # Calculate initial test points (golden section points)
+        c = int(b - (b - a) / golden_ratio)
+        d = int(a + (b - a) / golden_ratio)
+        
+        # Ensure c and d are different points
+        if c == d:
+            if c > a:
+                c -= step_size
+            else:
+                d += step_size
+        
+        # Ensure points are within interval
+        c = max(a, min(c, b))
+        d = max(a, min(d, b))
+        
+        # Evaluate initial points
+        fc = evaluate_edge_performance(c)
+        fd = evaluate_edge_performance(d)
+        
+        # Record iteration count
+        iterations = 0
+    
+        # Golden section search iteration
+        while b - a > step_size and iterations < max_iterations:
+            iterations += 1
+            
+            if fc > fd:  # fc > fd indicates [a,d] interval has more hope of containing optimal solution
+                b = d
+                d = c
+                c = int(b - (b - a) / golden_ratio)
+                # Ensure c is within interval and not equal to d
+                c = max(a, min(c, b))
+                if c == d:
+                    c = d - step_size
+                # Update function value
+                fd = fc
+                fc = evaluate_edge_performance(c)
+            else:  # fc <= fd indicates [c,b] interval has more hope of containing optimal solution
+                a = c
+                c = d
+                d = int(a + (b - a) / golden_ratio)
+                # Ensure d is within interval and not equal to c
+                d = max(a, min(d, b))
+                if c == d:
+                    d = c + step_size
+                # Update function value
+                fc = fd
+                fd = evaluate_edge_performance(d)
+            
+            print(f"Golden section search - Iteration {iterations}/{max_iterations} - Current interval: [{a}, {b}]")
+            with open(log_path, 'a', encoding='utf-8') as log_file:
+                log_file.write(f"Iteration {iterations}: Current interval [{a}, {b}], Interval width: {b-a}\n")
+    
+    else:
+        # Unsupported optimization method
+        print(f"Error: Unsupported optimization method '{optimization_method}'. Supported methods: 'golden_section', 'uniform_interval'")
+        with open(log_path, 'a', encoding='utf-8') as log_file:
+            log_file.write(f"Error: Unsupported optimization method '{optimization_method}'\n")
+        return None, None, []
     
     # Sort all collected results by edge count
     results.sort(key=lambda x: x[0])
@@ -831,13 +1050,196 @@ def optimize_edge_count(model, task_data_tensors, task_data_text, eap_config, ou
     with open(log_path, 'a', encoding='utf-8') as log_file:
         log_file.write(f"\n--- Optimization result summary ---\n")
         log_file.write(f"{result_summary}\n")
-        log_file.write(f"Total iterations: {iterations}\n")
+        if optimization_method == "golden_section":
+            log_file.write(f"Total iterations: {iterations}\n")
         log_file.write(f"Evaluated point count: {len(results)}\n")
         log_file.write(f"\nAll evaluated results: \n")
         for edge_count, performance, improvement in results:
             log_file.write(f"Edge count: {edge_count}, Performance: {performance:.4f}, Performance improvement: {improvement:.4f}\n")
         
+        # Generate detailed analysis summary table in log file if detailed analysis was enabled
+        if detailed_analysis and detailed_analysis_data:
+            try:
+                log_file.write(f"\n{'='*80}\n")
+                log_file.write(f"DETAILED ANALYSIS SUMMARY TABLE\n")
+                log_file.write(f"{'='*80}\n")
+                log_file.write("Edge Count | Original Perf | Circuit Perf | Improvement | Clean Attn | Corrupted Attn | Clean Heads | Corrupted Heads | High Attn Heads | Total Heads\n")
+                log_file.write("-" * 140 + "\n")
+                
+                # Sort detailed analysis data by edge count
+                sorted_data = sorted(detailed_analysis_data, key=lambda x: x['edge_count'])
+                
+                for data in sorted_data:
+                    try:
+                        edge_count = int(data['edge_count'])
+                        orig_perf = data.get('original_performance', 0.0)
+                        circuit_perf = data.get('circuit_performance', 0.0)
+                        improvement = data.get('performance_improvement', 0.0)
+                        clean_attn = data.get('avg_clean_subject_attention')
+                        corrupted_attn = data.get('avg_corrupted_subject_attention')
+                        clean_heads = data.get('clean_subject_attention_heads')
+                        corrupted_heads = data.get('corrupted_subject_attention_heads')
+                        high_attn_heads = data.get('num_high_attention_heads')
+                        total_heads = data.get('total_attention_heads')
+                        
+                        # Safe formatting
+                        clean_attn_str = f"{clean_attn:.4f}" if isinstance(clean_attn, (int, float)) else "N/A"
+                        corrupted_attn_str = f"{corrupted_attn:.4f}" if isinstance(corrupted_attn, (int, float)) else "N/A"
+                        clean_heads_str = str(clean_heads) if clean_heads is not None else "N/A"
+                        corrupted_heads_str = str(corrupted_heads) if corrupted_heads is not None else "N/A"
+                        high_attn_heads_str = str(high_attn_heads) if high_attn_heads is not None else "N/A"
+                        total_heads_str = str(total_heads) if total_heads is not None else "N/A"
+                        
+                        log_file.write(f"{edge_count:10d} | {orig_perf:11.4f} | {circuit_perf:10.4f} | {improvement:9.4f} | {clean_attn_str:10s} | {corrupted_attn_str:12s} | {clean_heads_str:11s} | {corrupted_heads_str:13s} | {high_attn_heads_str:13s} | {total_heads_str:11s}\n")
+                    except Exception as e_row:
+                        log_file.write(f"Error formatting row for edge count {data.get('edge_count', 'Unknown')}: {e_row}\n")
+                        continue
+                
+                log_file.write(f"\n{'='*80}\n")
+                log_file.write("Table Notes:\n")
+                log_file.write("- Original Perf: Original model performance\n")
+                log_file.write("- Circuit Perf: Circuit performance at this edge count\n")
+                log_file.write("- Improvement: Circuit performance - Original performance\n")
+                log_file.write("- Clean/Corrupted Attn: Average attention to clean/corrupted subjects\n")
+                log_file.write("- Clean/Corrupted Heads: Number of heads with attention scores for clean/corrupted subjects\n")
+                log_file.write("- High Attn Heads: Number of attention heads with >20% attention to subjects\n")
+                log_file.write("- Total Heads: Total number of attention heads in the circuit\n")
+                log_file.write(f"{'='*80}\n")
+                log_file.write(f"Generated detailed analysis table with {len(detailed_analysis_data)} entries.\n")
+            except Exception as e_table_log:
+                log_file.write(f"\nError generating detailed analysis table in log file: {e_table_log}\n")
+                log_file.write(f"Raw detailed analysis data count: {len(detailed_analysis_data) if detailed_analysis_data else 0}\n")
+        
         log_file.write(f"\nOptimization completed time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+    
+    # Generate detailed analysis table if detailed analysis was enabled
+    if detailed_analysis and detailed_analysis_data:
+        print(f"\n--- Generating detailed analysis table ---")
+        print(f"Found {len(detailed_analysis_data)} detailed analysis entries")
+        
+        # Create detailed analysis table
+        try:
+            import pandas as pd
+            
+            # Convert detailed analysis data to DataFrame
+            df = pd.DataFrame(detailed_analysis_data)
+            
+            # Sort by edge count
+            df = df.sort_values('edge_count')
+            
+            # Create formatted table
+            table_filename = os.path.join(output_dir, f"detailed_analysis_table_{task_name}.csv")
+            df.to_csv(table_filename, index=False)
+            print(f"Detailed analysis table saved to: {table_filename}")
+            
+            # Also save as formatted text table
+            text_table_filename = os.path.join(output_dir, f"detailed_analysis_table_{task_name}.txt")
+            with open(text_table_filename, 'w', encoding='utf-8') as table_file:
+                table_file.write(f"=== Detailed Analysis Table for {task_name} ===\n\n")
+                table_file.write("Edge Count | Original Perf | Circuit Perf | Improvement | Clean Attn | Corrupted Attn | Clean Heads | Corrupted Heads | High Attn Heads | Total Heads\n")
+                table_file.write("-" * 140 + "\n")
+                
+                for _, row in df.iterrows():
+                    try:
+                        edge_count = int(row['edge_count'])
+                        orig_perf = row['original_performance']
+                        circuit_perf = row['circuit_performance']
+                        improvement = row['performance_improvement']
+                        clean_attn = row['avg_clean_subject_attention'] if pd.notna(row['avg_clean_subject_attention']) else "N/A"
+                        corrupted_attn = row['avg_corrupted_subject_attention'] if pd.notna(row['avg_corrupted_subject_attention']) else "N/A"
+                        clean_heads = row['clean_subject_attention_heads'] if pd.notna(row['clean_subject_attention_heads']) else "N/A"
+                        corrupted_heads = row['corrupted_subject_attention_heads'] if pd.notna(row['corrupted_subject_attention_heads']) else "N/A"
+                        high_attn_heads = row['num_high_attention_heads'] if pd.notna(row['num_high_attention_heads']) else "N/A"
+                        total_heads = row['total_attention_heads'] if pd.notna(row['total_attention_heads']) else "N/A"
+                        
+                        if isinstance(clean_attn, (int, float)):
+                            clean_attn_str = f"{clean_attn:.4f}"
+                        else:
+                            clean_attn_str = str(clean_attn)
+                        
+                        if isinstance(corrupted_attn, (int, float)):
+                            corrupted_attn_str = f"{corrupted_attn:.4f}"
+                        else:
+                            corrupted_attn_str = str(corrupted_attn)
+                        
+                        table_file.write(f"{edge_count:10d} | {orig_perf:11.4f} | {circuit_perf:10.4f} | {improvement:9.4f} | {clean_attn_str:10s} | {corrupted_attn_str:12s} | {str(clean_heads):11s} | {str(corrupted_heads):13s} | {str(high_attn_heads):13s} | {str(total_heads):11s}\n")
+                    except Exception as e_row:
+                        table_file.write(f"Error formatting row for edge count {row.get('edge_count', 'Unknown')}: {e_row}\n")
+                        continue
+                
+                table_file.write("\nNotes:\n")
+                table_file.write("- Original Perf: Original model performance\n")
+                table_file.write("- Circuit Perf: Circuit performance at this edge count\n")
+                table_file.write("- Improvement: Circuit performance - Original performance\n")
+                table_file.write("- Clean/Corrupted Attn: Average attention to clean/corrupted subjects\n")
+                table_file.write("- Clean/Corrupted Heads: Number of heads with attention scores for clean/corrupted subjects\n")
+                table_file.write("- High Attn Heads: Number of attention heads with >20% attention to subjects\n")
+                table_file.write("- Total Heads: Total number of attention heads in the circuit\n")
+            
+            print(f"Detailed analysis text table saved to: {text_table_filename}")
+            
+            # Print summary table to console
+            print(f"\n=== Detailed Analysis Summary Table ===")
+            print("Edge Count | Circuit Perf | Clean Attn | Corrupted Attn | High Attn Heads")
+            print("-" * 75)
+            for _, row in df.iterrows():
+                try:
+                    edge_count = int(row['edge_count'])
+                    circuit_perf = row['circuit_performance']
+                    clean_attn = row['avg_clean_subject_attention'] if pd.notna(row['avg_clean_subject_attention']) else 0.0
+                    corrupted_attn = row['avg_corrupted_subject_attention'] if pd.notna(row['avg_corrupted_subject_attention']) else 0.0
+                    high_attn_heads = row['num_high_attention_heads'] if pd.notna(row['num_high_attention_heads']) else 0
+                    total_heads = row['total_attention_heads'] if pd.notna(row['total_attention_heads']) else 0
+                    
+                    print(f"{edge_count:10d} | {circuit_perf:10.4f} | {clean_attn:8.4f} | {corrupted_attn:12.4f} | {high_attn_heads:6d}/{total_heads:<6d}")
+                except Exception as e_console:
+                    print(f"Error formatting console row for edge count {row.get('edge_count', 'Unknown')}: {e_console}")
+                    continue
+            
+        except ImportError:
+            print("Warning: pandas not available, saving detailed analysis as JSON instead")
+            
+            # Save as JSON if pandas is not available
+            try:
+                import json
+                json_filename = os.path.join(output_dir, f"detailed_analysis_data_{task_name}.json")
+                with open(json_filename, 'w', encoding='utf-8') as json_file:
+                    json.dump(detailed_analysis_data, json_file, indent=2)
+                print(f"Detailed analysis JSON saved to: {json_filename}")
+                
+                # Print basic summary table to console
+                print(f"\n=== Detailed Analysis Summary Table (Basic) ===")
+                print("Edge Count | Circuit Perf | Performance Improvement")
+                print("-" * 50)
+                sorted_data = sorted(detailed_analysis_data, key=lambda x: x['edge_count'])
+                for data in sorted_data:
+                    edge_count = int(data['edge_count'])
+                    circuit_perf = data.get('circuit_performance', 0.0)
+                    improvement = data.get('performance_improvement', 0.0)
+                    print(f"{edge_count:10d} | {circuit_perf:10.4f} | {improvement:15.4f}")
+                    
+            except Exception as e_json:
+                print(f"Error saving JSON fallback: {e_json}")
+            
+        except Exception as e_table:
+            print(f"Error generating detailed analysis table: {e_table}")
+            traceback.print_exc()
+            
+            # Fallback: save raw data as JSON and print basic info
+            try:
+                import json
+                json_filename = os.path.join(output_dir, f"detailed_analysis_data_{task_name}.json")
+                with open(json_filename, 'w', encoding='utf-8') as json_file:
+                    json.dump(detailed_analysis_data, json_file, indent=2)
+                print(f"Detailed analysis JSON (fallback) saved to: {json_filename}")
+                print(f"Raw data contains {len(detailed_analysis_data)} entries")
+            except Exception as e_fallback:
+                print(f"Error in fallback save: {e_fallback}")
+    else:
+        if detailed_analysis:
+            print("Warning: Detailed analysis was enabled but no data was collected.")
+        else:
+            print("Detailed analysis was not enabled.")
     
     print(f"\n--- Edge count optimization completed ---")
     print(result_summary)

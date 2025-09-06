@@ -29,14 +29,16 @@ def load_model(model_name, model_config, device_config=None):
         force_device = device_config.get("force_device", None)
         auto_fallback = device_config.get("auto_fallback", True)
         
-        # If a device is forced
         if force_device is not None and force_device != "auto":
-            if force_device == "cpu":
+            if force_device.lower() == "cpu":  
                 print(f"Forcing CPU device")
                 return "cpu"
-            elif force_device.startswith("cuda"):
+            elif force_device.startswith("cuda") or force_device.lower().startswith("gpu"):
                 if torch.cuda.is_available():
                     try:
+                        if force_device.lower().startswith("gpu"):
+                           
+                            force_device = "cuda:0"
                         torch.cuda.set_device(force_device)
                         print(f"Forcing GPU device: {force_device}")
                         return force_device
@@ -52,7 +54,10 @@ def load_model(model_name, model_config, device_config=None):
                         return "cpu"
                     else:
                         raise RuntimeError(f"CUDA is not available, but GPU device {force_device} was specified")
-        
+            else:
+               
+                print(f"Warning: Unrecognized device '{force_device}', falling back to auto-detection")
+               
         # Auto-detect device
         if torch.cuda.is_available():
             device = "cuda:0"
@@ -86,8 +91,41 @@ def load_model(model_name, model_config, device_config=None):
         load_kwargs["torch_dtype"] = model_dtype
         final_compute_dtype = model_dtype
 
+        # Verify model path exists and contains model files
+        import os
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model path does not exist: {model_path}")
+        
+        expected_files = ["config.json", "pytorch_model.bin"]
+        missing_files = []
+        for file in expected_files:
+            if not os.path.exists(os.path.join(model_path, file)):
+                if not os.path.exists(os.path.join(model_path, "model.safetensors")):
+                    missing_files.append(file)
+        
+        if missing_files and not any(f.endswith('.safetensors') for f in os.listdir(model_path)):
+            print(f"Warning: Missing expected files in {model_path}: {missing_files}")
+        
+        print(f"Model path verified: {model_path}")
+        print(f"Files in model directory: {os.listdir(model_path)}")
+        
         # load model
+        print(f"Loading HF model from path: {model_path}")
         hf_model = AutoModelForCausalLM.from_pretrained(model_path, **load_kwargs)
+ 
+        print(f"=== HF Model Loaded Successfully ===")
+        print(f"Model type: {type(hf_model).__name__}")
+        print(f"Model config type: {type(hf_model.config).__name__}")
+        if hasattr(hf_model.config, 'num_hidden_layers'):
+            print(f"HF Config - num_hidden_layers: {hf_model.config.num_hidden_layers}")
+        if hasattr(hf_model.config, 'num_attention_heads'):
+            print(f"HF Config - num_attention_heads: {hf_model.config.num_attention_heads}")
+        if hasattr(hf_model.config, 'hidden_size'):
+            print(f"HF Config - hidden_size: {hf_model.config.hidden_size}")
+        if hasattr(hf_model.config, 'vocab_size'):
+            print(f"HF Config - vocab_size: {hf_model.config.vocab_size}")
+        print(f"Total parameters: {sum(p.numel() for p in hf_model.parameters()):,}")
+        print(f"=== End HF Model Info ===")
 
         # load tokenizer
         tokenizer = AutoTokenizer.from_pretrained(
@@ -126,19 +164,50 @@ def load_model(model_name, model_config, device_config=None):
         hooked_transformer_dtype = final_compute_dtype
 
         with torch.no_grad():
-            model = HookedTransformer.from_pretrained(
-                model_name=original_model_name_for_config,
-                hf_model=hf_model,
-                tokenizer=tokenizer,
-                device=global_device,
-                fold_ln=True,
-                center_writing_weights=True,
-                center_unembed=True,
-                torch_dtype=hooked_transformer_dtype
-            )
+           
+            print(f"Creating HookedTransformer from model: {original_model_name_for_config}")
+            print(f"Using hf_model with config: {hf_model.config}")
+            
+            try:
+                model = HookedTransformer.from_pretrained(
+                    model_name=original_model_name_for_config,
+                    hf_model=hf_model,
+                    tokenizer=tokenizer,
+                    device=global_device,
+                    fold_ln=True,
+                    center_writing_weights=True,
+                    center_unembed=True,
+                    torch_dtype=hooked_transformer_dtype
+                )
+            except Exception as e_ht:
+                print(f"Warning: Failed to create HookedTransformer with provided hf_model: {e_ht}")
+                print("Trying alternative approach...")
+              
+                model = HookedTransformer.from_pretrained(
+                    model_name=original_model_name_for_config,
+                    device=global_device,
+                    fold_ln=True,
+                    center_writing_weights=True,
+                    center_unembed=True,
+                    torch_dtype=hooked_transformer_dtype
+                )
             # ensure model is on the correct device
             model.to(global_device)
             model.eval()
+            
+           
+            print(f"=== Model Configuration Debug Info ===")
+            print(f"Model name: {model_name}")
+            print(f"Model path: {model_path}")
+            print(f"Original model name for config: {original_model_name_for_config}")
+            print(f"HF model config layers: {getattr(hf_model.config, 'num_hidden_layers', 'N/A')}")
+            print(f"HF model config heads: {getattr(hf_model.config, 'num_attention_heads', 'N/A')}")
+            print(f"HookedTransformer cfg layers: {model.cfg.n_layers}")
+            print(f"HookedTransformer cfg heads: {model.cfg.n_heads}")
+            print(f"HookedTransformer cfg d_model: {model.cfg.d_model}")
+            print(f"HookedTransformer cfg vocab size: {model.cfg.d_vocab}")
+            print(f"=== End Debug Info ===")
+            
             # Hook points configuration
             model.cfg.use_split_qkv_input = True
             model.cfg.use_attn_result = True

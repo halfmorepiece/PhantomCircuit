@@ -78,7 +78,6 @@ def safe_to_str_tokens(model, prompt):
     return tokens
 
 def safe_to_tokens(model, prompt):
-    # For string input, force no bos
     return model.to_tokens(prompt, prepend_bos=False)
 
 def identify_xsub_by_phantomcircuit(prompt, model, tokenizer, top_k=10, verbose=True):
@@ -88,7 +87,7 @@ def identify_xsub_by_phantomcircuit(prompt, model, tokenizer, top_k=10, verbose=
     logprob_var_map = compute_logprob_variance_across_masks(prompt_tokens, model, tokenizer, original_predictions_list, top_k=top_k)
     s_rpmi_scores_for_x_sub = []
     if verbose:
-        print("\n--- Identifying X_sub (phantomcircuit/Co_v2 method) ---")
+        print("\n--- Identifying X_sub (phantomcircuit/CoDA) ---")
         print(f"Prompt: {prompt}")
         print(f"Tokenized prompt: {prompt_tokens}")
         print(f"Top-{top_k} predictions for prompt:")
@@ -98,7 +97,7 @@ def identify_xsub_by_phantomcircuit(prompt, model, tokenizer, top_k=10, verbose=
     for i in tqdm(range(len(prompt_tokens)), desc="Masking for X_sub"):
         masked_token_candidate = prompt_tokens[i]
         if _is_eos_token(masked_token_candidate, model):
-            continue  # skip eos token
+            continue
         temp_prompt_tokens = prompt_tokens[:i] + prompt_tokens[i+1:]
         masked_prompt_P_prime_sub = "".join(temp_prompt_tokens) if hasattr(model, 'to_string') else tokenizer.convert_tokens_to_string(temp_prompt_tokens)
         if not masked_prompt_P_prime_sub.strip():
@@ -141,7 +140,6 @@ def identify_xsub_by_complex(prompt, model, tokenizer, top_k=10, alpha_vtop=0.01
         tokens = safe_to_tokens(model, prompt_text)
         if tokens.dim() == 1:
             tokens = tokens.unsqueeze(0)
-        # Ensure tokens and model are on the same device
         model_device = next(model.parameters()).device
         tokens = tokens.to(model_device)
         with torch.no_grad():
@@ -155,9 +153,7 @@ def identify_xsub_by_complex(prompt, model, tokenizer, top_k=10, alpha_vtop=0.01
         return all_log_probs, set(v_top_indices)
     all_log_probs_X, v_top_X = get_all_log_probs_and_vtop(prompt, model, tokenizer, alpha=alpha_vtop)
     indicator_scores_for_x_sub = []
-    # print topk
     if verbose:
-        # take topk
         top_k_indices = torch.topk(all_log_probs_X, top_k).indices
         print(f"Top-{top_k} predictions for prompt:")
         for i, idx in enumerate(top_k_indices):
@@ -170,7 +166,7 @@ def identify_xsub_by_complex(prompt, model, tokenizer, top_k=10, alpha_vtop=0.01
     for i in tqdm(range(len(prompt_tokens)), desc="Masking for X_sub (X_b method)"):
         masked_token_candidate_str = prompt_tokens[i]
         if _is_eos_token(masked_token_candidate_str, model):
-            continue  # skip eos token
+            continue
         temp_prompt_tokens = prompt_tokens[:i] + prompt_tokens[i+1:]
         masked_prompt_X_prime = "".join(temp_prompt_tokens)
         if not masked_prompt_X_prime.strip():
@@ -244,58 +240,73 @@ def identify_ysub_ydom(prompt, model, tokenizer, correct_answer=None, incorrect_
         print(f"\n--- Automatic Identification of Ysub/Ydom ---")
         print(f"Prompt: {prompt}")
         print(f"Tokenized prompt: {prompt_tokens}")
-    # 1. Get original predictions
     original_predictions_list = get_top_k_predictions(prompt, model, tokenizer, top_k=top_k)
     original_ranks_map = {token: rank for rank, (token, _) in enumerate(original_predictions_list)}
     if verbose:
         print(f"\nTop-{top_k} predictions: {original_predictions_list}")
-    # 2. Mask X_sub, find Ysub
-    # First, automatically find X_sub
     xsub_token, xsub_idx = identify_xsub_by_co(prompt, model, tokenizer, top_k=top_k, verbose=False)
     if xsub_token is None or xsub_idx == -1:
         print("X_sub not identified, cannot perform Ysub identification.")
         return None, None, {}
-    temp_prompt_tokens = prompt_tokens[:xsub_idx] + prompt_tokens[xsub_idx+1:]
-    masked_prompt = tokenizer.convert_tokens_to_string(temp_prompt_tokens)
-    masked_predictions_list = get_top_k_predictions(masked_prompt, model, tokenizer, top_k=top_k)
-    masked_ranks_map = {token: rank for rank, (token, _) in enumerate(masked_predictions_list)}
-    ysub_candidates = []
-    for token in [token for token, _ in original_predictions_list]:
-        orig_rank = original_ranks_map[token]
-        masked_rank = masked_ranks_map.get(token, top_k)
-        rank_drop = masked_rank - orig_rank
+    
+    ysub_candidates = [token for token, _ in original_predictions_list]
+    ysub_stats = []
+    import numpy as np
+    
+    for ysub_cand in ysub_candidates:
+        rank_improvements = []
+        orig_rank = original_ranks_map[ysub_cand]
         weight = top_k - orig_rank
-        ysub_candidates.append({
-            'token': token,
-            'orig_rank': orig_rank,
-            'masked_rank': masked_rank,
-            'rank_drop': rank_drop,
-            'weight': weight,
-            'score': rank_drop * weight
-        })
+        
+        for i, token in enumerate(prompt_tokens):
+            if i == xsub_idx:
+                continue
+                
+            temp_prompt_tokens = prompt_tokens[:i] + prompt_tokens[i+1:]
+            masked_prompt = tokenizer.convert_tokens_to_string(temp_prompt_tokens)
+            if not masked_prompt.strip():
+                continue
+                
+            masked_predictions_list = get_top_k_predictions(masked_prompt, model, tokenizer, top_k=top_k)
+            masked_ranks_map = {token: rank for rank, (token, _) in enumerate(masked_predictions_list)}
+            masked_rank = masked_ranks_map.get(ysub_cand, top_k)
+            
+            rank_improvement = orig_rank - masked_rank
+            weighted_rank_improvement = rank_improvement * weight
+            rank_improvements.append(weighted_rank_improvement)
+            
+        if rank_improvements:
+            avg_weighted_rank_improvement = np.mean(rank_improvements)
+            ysub_stats.append({
+                'token': ysub_cand,
+                'avg_weighted_rank_improvement': avg_weighted_rank_improvement,
+                'orig_rank': orig_rank,
+                'weight': weight,
+                'rank_improvements': rank_improvements
+            })
+            if verbose:
+                print(f"     Candidate: '{ysub_cand}', Original rank: {orig_rank}, Weight: {weight}, Rank improvements: {rank_improvements}, Avg weighted rank improvement: {avg_weighted_rank_improvement:.2f}")
+        else:
+            if verbose:
+                print(f"     Candidate: '{ysub_cand}', No valid rank improvements after masking")
+    
+    if ysub_stats:
+        ysub_best = max(ysub_stats, key=lambda x: x['avg_weighted_rank_improvement'])
+        ysub_token = ysub_best['token']
         if verbose:
-            print(f"     Candidate: '{token}', Original rank: {orig_rank}, Rank after masking X_sub: {masked_rank}, Rank drop: {rank_drop}, Weight: {weight}, Score: {rank_drop * weight}")
-    ysub_by_drop = max(ysub_candidates, key=lambda x: x['rank_drop'])
-    ysub_by_weighted = max(ysub_candidates, key=lambda x: x['score'])
-    ysub_token = ysub_by_weighted['token']
-    if verbose:
-        print(f"\nY_sub (Max Score): '{ysub_token}', Score: {ysub_by_weighted['score']} (Rank drop: {ysub_by_weighted['rank_drop']}, Weight: {ysub_by_weighted['weight']})")
-    # Check if recognized correctly
+            print(f"\nY_sub (Max Avg Weighted Rank Improvement): '{ysub_token}', Score: {ysub_best['avg_weighted_rank_improvement']:.2f}")
+    else:
+        ysub_token = None
+        if verbose:
+            print("Y_sub not identified (no valid rank improvements found)")
     ysub_correct = (correct_answer is not None and ysub_token.strip() == correct_answer.strip())
     if verbose and correct_answer is not None:
         print(f"Y_sub identification {'Correct' if ysub_correct else 'Incorrect'}, Identified as: '{ysub_token}', Correct answer: '{correct_answer}'")
-    # 3. Mask each token, find Ydom
     y_dom_candidates = [token for token, _ in original_predictions_list]
     y_dom_stats = []
     import numpy as np
-    log_probs = np.array([log_p for _, log_p in original_predictions_list])
-    probs = np.exp(log_probs)
-    probs = probs / probs.sum() if probs.sum() > 0 else probs
-    orig_probs_map = {token: probs[idx] for idx, (token, _) in enumerate(original_predictions_list)}
     for y_cand in y_dom_candidates:
         ranks_in_masked = []
-        prob = orig_probs_map[y_cand]
-        weight = 1.0 / prob if prob > 0 else 1e6
         for i, token in enumerate(prompt_tokens):
             temp_prompt_tokens = prompt_tokens[:i] + prompt_tokens[i+1:]
             masked_prompt = tokenizer.convert_tokens_to_string(temp_prompt_tokens)
@@ -307,23 +318,21 @@ def identify_ysub_ydom(prompt, model, tokenizer, correct_answer=None, incorrect_
             ranks_in_masked.append(rank)
         if ranks_in_masked:
             avg_rank = np.mean(ranks_in_masked)
-            weighted_avg_rank = avg_rank * weight
-            y_dom_stats.append({'token': y_cand, 'weighted_avg_rank': weighted_avg_rank})
+            y_dom_stats.append({'token': y_cand, 'avg_rank': avg_rank})
             if verbose:
-                print(f"   Candidate: '{y_cand}', Ranks after masking each token: {ranks_in_masked}, Probability reciprocal weight: {weight:.4f}, Average rank: {avg_rank:.2f}, Weighted average rank: {weighted_avg_rank:.2f}")
+                print(f"   Candidate: '{y_cand}', Ranks after masking each token: {ranks_in_masked}, Average rank: {avg_rank:.2f}")
         else:
             if verbose:
                 print(f"   Candidate: '{y_cand}', No valid ranks after masking")
     if y_dom_stats:
-        y_dom = min(y_dom_stats, key=lambda x: x['weighted_avg_rank'])
+        y_dom = min(y_dom_stats, key=lambda x: x['avg_rank'])
         ydom_token = y_dom['token']
         if verbose:
-            print(f"Ydom: '{ydom_token}', Weighted average rank lowest after masking: {y_dom['weighted_avg_rank']:.2f}")
+            print(f"Ydom: '{ydom_token}', Average rank lowest after masking: {y_dom['avg_rank']:.2f}")
     else:
         ydom_token = None
         if verbose:
             print("Ydom not identified (possibly all masked prompts are empty)")
-    # Check if Ydom recognized correctly
     ydom_correct = (incorrect_answer is not None and ydom_token is not None and ydom_token.strip() == incorrect_answer.strip())
     if verbose and incorrect_answer is not None:
         print(f"Ydom identification {'Correct' if ydom_correct else 'Incorrect'}, Identified as: '{ydom_token}', Incorrect answer: '{incorrect_answer}'")
@@ -332,7 +341,7 @@ def identify_ysub_ydom(prompt, model, tokenizer, correct_answer=None, incorrect_
         'ysub_correct': ysub_correct,
         'ydom_token': ydom_token,
         'ydom_correct': ydom_correct,
-        'ysub_detail': ysub_by_weighted,
+        'ysub_detail': ysub_best if ysub_stats else None,
         'ydom_detail': y_dom if y_dom_stats else None
     }
     return ysub_token, ydom_token, detail 

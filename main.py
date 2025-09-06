@@ -105,14 +105,21 @@ def main():
     
     if optimize_edges_flag:
         print(f"Will execute edge optimization: Target = {optimization_goal}")
+        print(f"   Optimization method: {EDGE_OPTIMIZATION_CONFIG['optimization_method']}")
+        print(f"   Detailed analysis: {EDGE_OPTIMIZATION_CONFIG['detailed_analysis']}")
         print(f"   Initial edge count: {initial_edge_count}")
-        print(f"   Step size: {step_size if step_size is not None else 'Auto (0.1% of total edges)'}")
+        if EDGE_OPTIMIZATION_CONFIG['optimization_method'] == "golden_section":
+            print(f"   Step size (golden section): {step_size if step_size is not None else 'Auto (0.1% of total edges)'}")
+        elif EDGE_OPTIMIZATION_CONFIG['optimization_method'] == "uniform_interval":
+            print(f"   Uniform step size: {EDGE_OPTIMIZATION_CONFIG['uniform_step_size']}")
         if edge_count_range:
             print(f"   Edge count range: [{edge_count_range[0]}, {edge_count_range[1]}]")
         else:
             print(f"   Edge count range: Auto")
         if optimization_goal == "target" and target_performance is not None:
             print(f"   Target performance value: {target_performance}")
+        if EDGE_OPTIMIZATION_CONFIG['detailed_analysis']:
+            print(f"   Detailed analysis includes: performance, attention metrics, high attention heads count")
 
     if model_name not in MODEL_CONFIGS:
         print(f"Error: Invalid model name '{model_name}'. Available options: {list(MODEL_CONFIGS.keys())}")
@@ -214,9 +221,16 @@ def main():
         if optimize_edges_flag:
             print(f"Edge optimization enabled: Yes")
             print(f"   Optimization goal: {optimization_goal}")
-            print(f"   Maximum iterations: {EDGE_OPTIMIZATION_CONFIG['max_iterations']} times")
+            print(f"   Optimization method: {EDGE_OPTIMIZATION_CONFIG['optimization_method']}")
+            print(f"   Detailed analysis: {EDGE_OPTIMIZATION_CONFIG['detailed_analysis']}")
+            if EDGE_OPTIMIZATION_CONFIG['optimization_method'] == "golden_section":
+                print(f"   Maximum iterations: {EDGE_OPTIMIZATION_CONFIG['max_iterations']} times")
+            elif EDGE_OPTIMIZATION_CONFIG['optimization_method'] == "uniform_interval":
+                print(f"   Uniform step size: {EDGE_OPTIMIZATION_CONFIG['uniform_step_size']}")
             if optimization_goal == "target" and target_performance is not None:
                 print(f"   Target performance value: {target_performance}")
+            if EDGE_OPTIMIZATION_CONFIG['detailed_analysis']:
+                print(f"   Detailed analysis includes: performance, attention metrics, high attention heads count")
         else:
             print(f"Edge optimization enabled: No")
         print(f"=== Configuration Information End ===\n")
@@ -282,21 +296,21 @@ def main():
                 do_eap = True
                 if hasattr(args, 'use_co_xsub') and args.use_co_xsub:
                     tokenizer = model.tokenizer
-                    print("\n[Co method] Automatically identifying X_sub, Y_sub, Y_dom:")
+                    print("\n Automatically identifying X_sub, Y_sub, Y_dom:")
                     xsub_token, xsub_idx = identify_xsub_by_co(
                         prompt_for_analysis, model, tokenizer,
                         method=args.co_xsub_method if hasattr(args, 'co_xsub_method') else 'phantomcircuit',
                         top_k=10, verbose=True
                     )
-                    print(f"[Co method] Identified X_sub: '{xsub_token}' (position: {xsub_idx})")
+                    print(f" Identified X_sub: '{xsub_token}' (position: {xsub_idx})")
                     ysub_token, ydom_token, detail = identify_ysub_ydom(
                         prompt_for_analysis, model, tokenizer,
                         correct_answer=task_config.get('correct_answer'),
                         incorrect_answer=task_config.get('incorrect_answer'),
                         top_k=10, verbose=True
                     )
-                    print(f"[Co method] Identified Y_sub: '{ysub_token}', Y_dom: '{ydom_token}'")
-                    print(f"[Co method] Detailed information: {detail}")
+                    print(f" Identified Y_sub: '{ysub_token}', Y_dom: '{ydom_token}'")
+                    print(f" Detailed information: {detail}")
                     if hasattr(args, 'co_xsub_eap') and not args.co_xsub_eap:
                         do_eap = False
                 
@@ -324,7 +338,11 @@ def main():
                                     edge_count_range=edge_count_range,
                                     target_performance=target_performance,
                                     optimization_goal=optimization_goal,
-                                    max_iterations=EDGE_OPTIMIZATION_CONFIG["max_iterations"]
+                                    optimization_method=EDGE_OPTIMIZATION_CONFIG["optimization_method"],
+                                    uniform_step_size=EDGE_OPTIMIZATION_CONFIG["uniform_step_size"],
+                                    max_iterations=EDGE_OPTIMIZATION_CONFIG["max_iterations"],
+                                    detailed_analysis=EDGE_OPTIMIZATION_CONFIG["detailed_analysis"],
+                                    task_config=task_config
                                 )
                                 if best_edge_count is not None:
                                     print(f"\nEdge optimization completed: Found best edge count = {best_edge_count}")
@@ -619,12 +637,11 @@ def main():
 
 
 
-    # 记录分析结束时间到主日志
+    
     print(f"\n=== Knowledge Circuit Analysis Completed ===")
     print(f"Completion time: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
    
-    # --- Output localization success rate after all tasks are completed ---
-  
-# --- Entry point ---
+   
+
 if __name__ == "__main__":
     sys.exit(main()) 
