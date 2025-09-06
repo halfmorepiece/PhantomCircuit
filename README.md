@@ -15,7 +15,7 @@
 </h5>
 
 ## 📣 News
-* **[2025/08/31]**  🚀 Source code released!
+* **[2025/09/06]**  🚀 Source code released!
 * **[2025/08/21]**  🎉🎉🎉 PhantomCircuit has been accepted by EMNLP 2025! 
 
 ## 🎯 Overview
